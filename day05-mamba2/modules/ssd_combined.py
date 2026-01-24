@@ -9,9 +9,9 @@ import triton
 import triton.language as tl
 
 from ssd_chunk_state import _chunk_mamba_fwd, _chunk_state_fwd
-from ssd_state_passing import _state_passing_fwd
+from ssd_state_passing import _state_passing_fwd, _state_passing_bwd
 from ssd_bmm import _bmm_chunk_fwd
-from ssd_chunk_scan import _chunk_scan_fwd, _chunk_scan_bwd_dz
+from ssd_chunk_scan import _chunk_scan_fwd, _chunk_scan_bwd_dz, _chunk_scan_bwd_dstates
 
 def _mamba_chunk_scan_combined_fwd(
     x,
@@ -144,9 +144,23 @@ def _mamba_chunk_scan_combined_bwd(
         
     # 2. $$y_{t,p} = \underbrace{\text{Decay}_t}_{\text{标量}} \cdot \sum_{n=1}^{N} (\underbrace{h_{p,n}}_{\text{状态}} \cdot \underbrace{C_{t,n}}_{\text{参数}})$$
     
-    # $\partial h_{prev}$
+    # $\partial h_{prev}$ 
+    # [batch, nchunks, nheads, head_dim, d_state]
     dstates = _chunk_scan_bwd_dstates(C, dA_cumsum, dout, seq_idx=seq_idx, dtype=states.dtype)
 
+    dstates, ddA_chunk_cumsum, dinitial_states, states = _state_passing_bwd(
+        rearrange(states, "... p n -> ... (p n)"),
+        dA_cumsum[:, :, :, -1], # dA_cumsum: [batch, nheads, nchunks, chunk_size]
+        rearrange(dstates, "... p n -> ... (p n)"),
+        dfinal_states=rearrange(dfinal_states, "... p n -> ... (p n)") if dfinal_states is not None else None,
+        seq_idx=seq_idx,
+        has_initial_states=initial_states is not None,
+        dstates_dtype=x.dtype,
+        states_dtype=x.dtype,
+        chunk_size=chunk_size,
+    )
+    
+    
 class MambaChunkScanCombinedFn(torch.autograd.Function):
 
     @staticmethod
