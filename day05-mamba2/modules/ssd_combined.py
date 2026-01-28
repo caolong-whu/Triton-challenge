@@ -8,12 +8,16 @@ import math
 import triton
 import triton.language as tl
 
-from ssd_chunk_state import _chunk_mamba_fwd, _chunk_state_fwd
+from ssd_chunk_state import _chunk_mamba_fwd, _chunk_state_fwd, _chunk_state_bwd_db
 from ssd_state_passing import _state_passing_fwd, _state_passing_bwd
 from ssd_bmm import _bmm_chunk_fwd
 from ssd_chunk_scan import _chunk_scan_fwd, _chunk_scan_bwd_dz, _chunk_scan_bwd_dstates
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
+
+def init_to_zero(names):
+    return lambda nargs: [nargs[name].zero_() for name in names if nargs[name] is not None]
+
 
 def _mamba_chunk_scan_combined_fwd(
     x,
@@ -79,9 +83,6 @@ def _mamba_chunk_scan_combined_fwd(
     # Step 5: Calculate C * states * dA_cumsm + CB * dA_cumsum * dt * x + D * x
     out, out_x = _chunk_scan_fwd(CB, x, dt, dA_cumsum, C, states, D=D, z=z, seq_idx=seq_idx)
     return out, out_x, dt, dA_cumsum, states, final_states
-
-def init_to_zero(names):
-    return lambda nargs: [nargs[name].zero_() for name in names if nargs[name] is not None]
 
 
 @triton.autotune(
@@ -460,6 +461,7 @@ def _mamba_chunk_scan_combined_bwd(
     dinitial_states = rearrange(dinitial_states, "... (p n) -> ... p n", n=d_state) if dinitial_states is not None else None
     dx, ddt, dD_from_x = _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=D, seq_idx=seq_idx, dx=dx)
     
+    dB, ddA_next = _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, B=B, ngroups=ngroups)
     
     
     
