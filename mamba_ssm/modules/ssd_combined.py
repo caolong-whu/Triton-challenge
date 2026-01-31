@@ -10,7 +10,7 @@ import triton.language as tl
 
 from ssd_chunk_state import _chunk_mamba_fwd, _chunk_state_fwd, _chunk_state_bwd_db
 from ssd_state_passing import _state_passing_fwd, _state_passing_bwd
-from ssd_bmm import _bmm_chunk_fwd
+from ssd_bmm import _bmm_chunk_fwd, _bmm_chunk_bwd
 from ssd_chunk_scan import _chunk_scan_fwd, _chunk_scan_bwd_dz, _chunk_scan_bwd_dstates, _chunk_scan_bwd_dC, _chunk_scan_bwd_dcb
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
@@ -464,8 +464,9 @@ def _mamba_chunk_scan_combined_bwd(
     dB, ddA_next = _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, B=B, ngroups=ngroups)
     dC, ddA_prev = _chunk_scan_bwd_dC(states.to(x.dtype), dA_cumsum, dout, seq_idx=seq_idx, C=C, ngroups=ngroups)
     dCB = _chunk_scan_bwd_dcb(x, dt, dA_cumsum, dout, seq_idx=seq_idx, ngroups=ngroups)
-    
-    
+    dCB = dCB.to(CB.dtype)
+    _bmm_chunk_bwd(C, dCB, residual=dB, out=dB_given)
+    _bmm_chunk_bwd(B, rearrange(dCB, "... m n -> ... n m"), residual=dC, out=dC_given)
 class MambaChunkScanCombinedFn(torch.autograd.Function):
 
     @staticmethod
