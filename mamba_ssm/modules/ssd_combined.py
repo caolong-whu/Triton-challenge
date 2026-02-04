@@ -7,11 +7,12 @@ import math
 
 import triton
 import triton.language as tl
+from packaging import version
 
-from ssd_chunk_state import _chunk_mamba_fwd, _chunk_state_fwd, _chunk_state_bwd_db
+from ssd_chunk_state import _chunk_mamba_fwd, _chunk_state_fwd, _chunk_state_bwd_db, _chunk_cumsum_bwd
 from ssd_state_passing import _state_passing_fwd, _state_passing_bwd
 from ssd_bmm import _bmm_chunk_fwd, _bmm_chunk_bwd
-from ssd_chunk_scan import _chunk_scan_fwd, _chunk_scan_bwd_dz, _chunk_scan_bwd_dstates, _chunk_scan_bwd_dC, _chunk_scan_bwd_dcb
+from ssd_chunk_scan import _chunk_scan_fwd, _chunk_scan_bwd_dz, _chunk_scan_bwd_dstates, _chunk_scan_bwd_dC, _chunk_scan_bwd_dcb, _chunk_scan_bwd_ddAcs_stable
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
@@ -425,10 +426,11 @@ def _mamba_chunk_scan_combined_bwd(
     states = rearrange(states, "... (p n) -> ... p n", n=d_state)
 
     ######## Backward ########
-    # 1. out = y * SiLU(z) + D * x -> dz, dy, dD
+    # 1. out = (y + D * x) * SiLU(z) -> dz, dy, dD
     if z is not None:
         # (dz, dout_x, dD, ddA_cumsum) or (dz, dout_x, dD)
         dz, dout, dD, *rest = _chunk_scan_bwd_dz(x, z, out, dout, chunk_size=chunk_size, has_ddAcs=False, D=D, dz=dz, recompute_output=recompute_output)
+        # outz = (y + D * x) * SiLU(z)
         outz = rest[0] if recompute_output else out
     else:
         dz = None
@@ -462,11 +464,29 @@ def _mamba_chunk_scan_combined_bwd(
     dx, ddt, dD_from_x = _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=D, seq_idx=seq_idx, dx=dx)
     
     dB, ddA_next = _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, B=B, ngroups=ngroups)
-    dC, ddA_prev = _chunk_scan_bwd_dC(states.to(x.dtype), dA_cumsum, dout, seq_idx=seq_idx, C=C, ngroups=ngroups)
+    dC, ddA_cumsum_prev = _chunk_scan_bwd_dC(states.to(x.dtype), dA_cumsum, dout, seq_idx=seq_idx, C=C, ngroups=ngroups)
     dCB = _chunk_scan_bwd_dcb(x, dt, dA_cumsum, dout, seq_idx=seq_idx, ngroups=ngroups)
     dCB = dCB.to(CB.dtype)
     _bmm_chunk_bwd(C, dCB, residual=dB, out=dB_given)
     _bmm_chunk_bwd(B, rearrange(dCB, "... m n -> ... n m"), residual=dC, out=dC_given)
+    
+    """
+    ddA_chunk_cumsum: [batch, nchunks, nheads]: [dexp(A0 + A1), dexp(A2 + A3), dexp(A4 + A5), ...]
+    ddA_next: [batch, nchunks, nheads, chunk_size]: [[dexp(A0), dexp(A1)], [dexp(A2), dexp(A3)], [dexp(A4), dexp(A5)], ...]
+    ddA_cumsum_prev: [batch, nchunks, nheads, chunk_size]: [[dexp(A0), dexp(A0 + A1)], [dexp(A2), dexp(A2 + A3)], [dexp(A4), dexp(A4 + A5)], ...]
+    """
+    ddA_cumsum_prev[..., -1] += ddA_chunk_cumsum
+    # y = cumsum(x) -> dx = flip(cumsum(flip(dy)))
+    ddA_prev = ddA_chunk_cumsum.flip[-1].cumsum(dim=-1).flip(-1)
+    
+    ddA = _chunk_scan_bwd_ddAcs_stable(x, dt, dA_cumsum, dout, CB)
+    ddA += ddA_next + ddA_prev
+    
+    ddt_given, dA, ddt_bias = _chunk_cumsum_bwd(ddA, ddt, dt_in, A, dt_bias=dt_bias, dt_softplus=dt_softplus, dt_limit=dt_limit, ddt=ddt_given)
+    
+    return_vals = (dx, ddt_given, dA, dB_given, dC_given, dD, dz, ddt_bias, dinitial_states)
+    return return_vals if not recompute_output else (*return_vals, outz)
+    
 class MambaChunkScanCombinedFn(torch.autograd.Function):
 
     @staticmethod
