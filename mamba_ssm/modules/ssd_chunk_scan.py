@@ -973,7 +973,7 @@ def _chunk_scan_bwd_ddAcs_stable_kernel(
     
     lo, hi = 0, (pid_m + 1) * BLOCK_SIZE_M # t > s -> row > col
     
-    for start_n in range(lo, hi,                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          BLOCK_SIZE_N):
+    for start_n in range(lo, hi, BLOCK_SIZE_N):
         start_n = tl.multiple_of(start_n, BLOCK_SIZE_N)
         x = tl.load(x_ptrs, mask=(offs_k[:, None] < head_dim) & (offs_n[None, :] < chunk_size_limit - start_n), other=0.0)
         # dout @ x.T
