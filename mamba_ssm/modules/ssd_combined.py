@@ -470,6 +470,9 @@ def _mamba_chunk_scan_combined_bwd(
     _bmm_chunk_bwd(C, dCB, residual=dB, out=dB_given)
     _bmm_chunk_bwd(B, rearrange(dCB, "... m n -> ... n m"), residual=dC, out=dC_given)
     
+    if z is None:
+        dD = dD_from_x
+
     """
     ddA_chunk_cumsum: [batch, nchunks, nheads]: [dexp(A0 + A1), dexp(A2 + A3), dexp(A4 + A5), ...]
     ddA_next: [batch, nchunks, nheads, chunk_size]: [[dexp(A0), dexp(A1)], [dexp(A2), dexp(A3)], [dexp(A4), dexp(A5)], ...]
